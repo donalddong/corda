@@ -289,28 +289,36 @@ class HibernateQueryCriteriaParser(val contractStateType: Class<out ContractStat
                         }
                 //TODO investigate possibility to avoid producing redundant joins in SQL for multiple aggregate functions against the same table
                 aggregateExpressions.add(aggregateExpression)
-                // optionally order by this aggregate function
-                expression.orderBy?.let {
-                    val orderCriteria =
-                            when (expression.orderBy!!) {
-                                Sort.Direction.ASC -> criteriaBuilder.asc(aggregateExpression)
-                                Sort.Direction.DESC -> criteriaBuilder.desc(aggregateExpression)
-                            }
-                    criteriaQuery.orderBy(orderCriteria)
-                }
+                // Most portable way to 'group by' is to use a positional parameter  e.g. 'group by 1' in case a database doesn't support
+                // expression in 'group by' clause e.g. 'group by sum(col)' and Hibernate Criteria Builder can't produce alias 'group by col_alias'
+                val orderByColumnPosition = aggregateExpressions.size
+                var shiftLeft = 0
                 // add optional group by clauses
                 expression.groupByColumns?.let { columns ->
                     val groupByExpressions =
                             columns.map { _column ->
                                 val path = root.get<Any?>(getColumnName(_column))
+                                val columnNumberBeforeRemoval = aggregateExpressions.size
                                 if (path is SingularAttributePath) //remove the same columns from different joins to match the single column in 'group by' only (from the last join)
                                     aggregateExpressions.removeAll {
                                         elem -> if (elem is SingularAttributePath) elem.attribute.javaMember == path.attribute.javaMember else false
                                     }
+                                //record how many times a duplicated column was removed (from the previous 'parseAggregateFunction' run)
+                                shiftLeft += columnNumberBeforeRemoval - aggregateExpressions.size
                                 aggregateExpressions.add(path)
                                 path
                             }
                     criteriaQuery.groupBy(groupByExpressions)
+                }
+                // optionally order by this aggregate function
+                expression.orderBy?.let {
+                    val orderCriteria =
+                            when (expression.orderBy!!) {
+                            // when adding column position of 'group by' shift in case columns were removed
+                                Sort.Direction.ASC -> criteriaBuilder.asc(criteriaBuilder.literal<Int>(orderByColumnPosition - shiftLeft))
+                                Sort.Direction.DESC -> criteriaBuilder.desc(criteriaBuilder.literal<Int>(orderByColumnPosition - shiftLeft))
+                            }
+                    criteriaQuery.orderBy(orderCriteria)
                 }
                 return aggregateExpression
             }
